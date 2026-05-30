@@ -12,15 +12,12 @@ UART_HandleTypeDef huart2;
 /* ===== STRUCT ===== */
 typedef struct {
     float acc;
-    float lat;
-    float lon;
     uint32_t timestamp;
 } CrashData;
 
 /* ===== GLOBAL VARIABLES ===== */
 int16_t ax, ay, az;
-float latitude = 28.6139;
-float longitude = 77.2090;
+float acc_filtered = 0;
 uint8_t crash_flag = 0;
 uint16_t eeprom_index = 0;
 
@@ -35,20 +32,26 @@ void MPU6050_Read()
     az = (data[4]<<8)|data[5];
 }
 
-/* ===== ACCELERATION ===== */
+/* ===== ACCELERATION WITH FILTER ===== */
 float get_acceleration()
 {
     float Ax = ax / 16384.0;
     float Ay = ay / 16384.0;
     float Az = az / 16384.0;
-    return sqrt(Ax*Ax + Ay*Ay + Az*Az);
+
+    float acc = sqrt(Ax*Ax + Ay*Ay + Az*Az);
+
+    // Low-pass filter (reduces noise)
+    acc_filtered = 0.7 * acc_filtered + 0.3 * acc;
+
+    return acc_filtered;
 }
 
 /* ===== UART SEND ===== */
-void send_to_esp(float lat, float lon, float acc)
+void send_to_esp(float acc)
 {
-    char msg[100];
-    sprintf(msg, "CRASH,%.4f,%.4f,%.2f\n", lat, lon, acc);
+    char msg[50];
+    sprintf(msg, "CRASH,%.2f\n", acc);
     HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 1000);
 }
 
@@ -60,18 +63,19 @@ void EEPROM_Write(uint16_t addr, uint8_t *data, uint16_t size)
 }
 
 /* ===== SAVE CRASH ===== */
-void save_crash_data(float acc, float lat, float lon)
+void save_crash_data(float acc)
 {
     CrashData crash;
+
     crash.acc = acc;
-    crash.lat = lat;
-    crash.lon = lon;
     crash.timestamp = HAL_GetTick();
 
     EEPROM_Write(eeprom_index, (uint8_t*)&crash, sizeof(CrashData));
 
     eeprom_index += sizeof(CrashData);
-    if(eeprom_index >= 4096) eeprom_index = 0;
+
+    if(eeprom_index >= 4096)
+        eeprom_index = 0;
 }
 
 /* ===== MAIN ===== */
@@ -93,14 +97,21 @@ int main(void)
         MPU6050_Read();
         float acc = get_acceleration();
 
-        if(acc > 3.5 && crash_flag == 0)
+        /* ===== CRASH DETECTION ===== */
+        if(acc > 3.0 && crash_flag == 0)
         {
             crash_flag = 1;
 
-            send_to_esp(latitude, longitude, acc);
-            save_crash_data(acc, latitude, longitude);
+            send_to_esp(acc);       // send to ESP8266
+            save_crash_data(acc);   // store in EEPROM
         }
 
-        HAL_Delay(200);
+        /* ===== RESET LOGIC ===== */
+        if(acc < 1.2)
+        {
+            crash_flag = 0;
+        }
+
+        HAL_Delay(100);
     }
 }
